@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const axios = require('axios');
+const fs = require('fs');
 
 const TRACKER_URL = process.env.TRACKER_URL || 'https://onepe-onboarding.netlify.app/';
 const PIN = process.env.TRACKER_PIN || '2026';
@@ -8,6 +9,9 @@ const API_URL = process.env.GREEN_API_URL || '';
 const INSTANCE = process.env.GREEN_INSTANCE_ID || '';
 const TOKEN = process.env.GREEN_API_TOKEN || '';
 const PHONE = process.env.WHATSAPP_NUMBER || '';
+const GROUP_ID_RAW = process.env.WHATSAPP_GROUP_ID || '';
+
+const SNAPSHOT_FILE = 'tracker-snapshot.json';
 
 const STAGES = [
   '📋 Documents Collected',
@@ -26,12 +30,18 @@ function clean(text) {
   return (text || '').toString().replace(/\s+/g, ' ').trim();
 }
 
+function normalizeGroupId(groupId) {
+  const value = clean(groupId);
+  if (!value) return '';
+  return value.endsWith('@g.us') ? value : `${value}@g.us`;
+}
+
 function validateEnv() {
   const missing = [];
   if (!API_URL) missing.push('GREEN_API_URL');
   if (!INSTANCE) missing.push('GREEN_INSTANCE_ID');
   if (!TOKEN) missing.push('GREEN_API_TOKEN');
-  if (!PHONE) missing.push('WHATSAPP_NUMBER');
+  if (!PHONE && !GROUP_ID_RAW) missing.push('WHATSAPP_NUMBER or WHATSAPP_GROUP_ID');
 
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -41,15 +51,11 @@ function validateEnv() {
 function normalizeStage(value) {
   if (value === undefined || value === null || value === '') return '';
 
-  // Numeric stage support
   const num = Number(value);
   if (!Number.isNaN(num)) {
-    // If app uses 0-based stage index: 0..9
     if (num >= 0 && num < STAGES.length) {
       return STAGES[num];
     }
-
-    // If app uses 1-based stage index: 1..10
     if (num >= 1 && num <= STAGES.length) {
       return STAGES[num - 1];
     }
@@ -268,26 +274,80 @@ async function extractMerchantData(page) {
       }
     }
 
-    const normalized = merchantsData.map(item => {
+    return merchantsData.map(item => {
       const merchant = pick(item, nameCandidates);
       const stage = pick(item, stageCandidates);
-      return { merchant, stage, raw: item };
-    });
+      const updatedAt =
+        pick(item, ['updated_at', 'updatedAt', 'lastUpdated', 'modifiedAt', 'modified_at']) || '';
 
-    return {
-      extracted: normalized,
-      debug: {
-        count: normalized.length,
-        sample: normalized.slice(0, 5)
-      }
-    };
+      return { merchant, stage, updatedAt, raw: item };
+    });
   });
 
-  console.log('DEBUG_MERCHANT_RESULT:', JSON.stringify(result, null, 2));
-  return result.extracted || [];
+  console.log('DEBUG_MERCHANT_RESULT:', JSON.stringify({
+    count: result.length,
+    sample: result.slice(0, 5)
+  }, null, 2));
+
+  return result || [];
 }
 
-function buildMessage(data) {
+function loadPreviousSnapshot() {
+  try {
+    return JSON.parse(fs.readFileSync(SNAPSHOT_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveSnapshot(data) {
+  const snapshot = {};
+  data.forEach(item => {
+    snapshot[item.merchant] = {
+      stage: normalizeStage(item.stage),
+      updatedAt: item.updatedAt || ''
+    };
+  });
+  fs.writeFileSync(SNAPSHOT_FILE, JSON.stringify(snapshot, null, 2));
+}
+
+function getStageCounts(data) {
+  const counts = {};
+  STAGES.forEach(stage => {
+    counts[stage] = 0;
+  });
+
+  for (const item of data) {
+    const stage = normalizeStage(item.stage);
+    if (counts[stage] !== undefined) {
+      counts[stage]++;
+    }
+  }
+
+  return counts;
+}
+
+function getMovements(data, previousSnapshot) {
+  const moved = [];
+
+  for (const item of data) {
+    const merchant = clean(item.merchant);
+    const newStage = normalizeStage(item.stage);
+    const previous = previousSnapshot[merchant];
+
+    if (previous && previous.stage && previous.stage !== newStage) {
+      moved.push({
+        merchant,
+        oldStage: previous.stage,
+        newStage
+      });
+    }
+  }
+
+  return moved;
+}
+
+function getStageWiseGroups(data) {
   const grouped = {};
   STAGES.forEach(stage => {
     grouped[stage] = [];
@@ -302,7 +362,34 @@ function buildMessage(data) {
     }
   }
 
-  let message = '📊 OnePe Onboarding Tracker – Stage Wise\n\n';
+  return grouped;
+}
+
+function buildMessage(data, previousSnapshot = {}) {
+  const grouped = getStageWiseGroups(data);
+  const counts = getStageCounts(data);
+  const movements = getMovements(data, previousSnapshot);
+
+  let message = '📊 OnePe Tracker – Smart Team Update\n\n';
+
+  const total = Object.values(grouped).reduce((sum, arr) => sum + arr.length, 0);
+  message += `Total Merchants: ${total}\n\n`;
+
+  message += '📈 Stage Counts\n';
+  for (const stage of STAGES) {
+    message += `${stage}: ${counts[stage]}\n`;
+  }
+
+  message += '\n🔄 Moved Since Last Run\n';
+  if (!movements.length) {
+    message += '• No stage movement\n';
+  } else {
+    movements.slice(0, 20).forEach(item => {
+      message += `• ${item.merchant}: ${item.oldStage} → ${item.newStage}\n`;
+    });
+  }
+
+  message += '\n📋 Stage-wise Account Details\n\n';
 
   for (const stage of STAGES) {
     message += `${stage}\n`;
@@ -316,28 +403,32 @@ function buildMessage(data) {
     }
   }
 
-  const total = Object.values(grouped).reduce((sum, arr) => sum + arr.length, 0);
-  message += `Total Merchants: ${total}`;
-
-  return message;
+  return message.trim();
 }
 
 async function sendWhatsApp(message) {
   const url = `${API_URL}/waInstance${INSTANCE}/sendMessage/${TOKEN}`;
+  const groupId = normalizeGroupId(GROUP_ID_RAW);
 
-  const response = await axios.post(
-    url,
-    {
-      chatId: `${PHONE}@c.us`,
-      message
-    },
-    {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 60000
-    }
-  );
+  const chatIds = [];
+  if (PHONE) chatIds.push(`${PHONE}@c.us`);
+  if (groupId) chatIds.push(groupId);
 
-  console.log('WhatsApp sent:', response.data);
+  for (const chatId of chatIds) {
+    const response = await axios.post(
+      url,
+      {
+        chatId,
+        message
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60000
+      }
+    );
+
+    console.log(`WhatsApp sent to ${chatId}:`, response.data);
+  }
 }
 
 (async () => {
@@ -354,18 +445,23 @@ async function sendWhatsApp(message) {
     const normalized = rawData
       .map(item => ({
         merchant: clean(item.merchant),
-        stage: normalizeStage(item.stage)
+        stage: normalizeStage(item.stage),
+        updatedAt: item.updatedAt || ''
       }))
       .filter(item => item.merchant && item.stage && STAGES.includes(item.stage));
 
     if (!normalized.length) {
-      throw new Error('Merchant data extracted, but merchant name or stage mapping still did not match.');
+      throw new Error('Merchant data extracted, but merchant name or stage mapping did not match.');
     }
 
-    const message = buildMessage(normalized);
+    const previousSnapshot = loadPreviousSnapshot();
+    const message = buildMessage(normalized, previousSnapshot);
+
     console.log(message);
 
     await sendWhatsApp(message);
+    saveSnapshot(normalized);
+
     console.log('WhatsApp message sent successfully.');
   } finally {
     await browser.close();
