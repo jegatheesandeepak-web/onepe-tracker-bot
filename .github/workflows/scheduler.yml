@@ -1,0 +1,41 @@
+name: OnePe Tracker Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 9:07 AM IST = 03:37 UTC
+    - cron: '37 3 * * *'
+    # 2:07 PM IST = 08:37 UTC
+    - cron: '37 8 * * *'
+    # 8:07 PM IST = 14:37 UTC
+    - cron: '37 14 * * *'
+
+jobs:
+  run-tracker-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run tracker bot
+        env:
+          TRACKER_URL: ${{ secrets.TRACKER_URL }}
+          TRACKER_PIN: ${{ secrets.TRACKER_PIN }}
+          GREEN_API_URL: ${{ secrets.GREEN_API_URL }}
+          GREEN_INSTANCE_ID: ${{ secrets.GREEN_INSTANCE_ID }}
+          GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
+          WHATSAPP_NUMBER: ${{ secrets.WHATSAPP_NUMBER }}
+        run: node index.js
