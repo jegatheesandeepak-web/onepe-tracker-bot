@@ -32,6 +32,7 @@ function validateEnv() {
   if (!INSTANCE) missing.push('GREEN_INSTANCE_ID');
   if (!TOKEN) missing.push('GREEN_API_TOKEN');
   if (!PHONE) missing.push('WHATSAPP_NUMBER');
+
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -83,9 +84,15 @@ async function unlockTracker(page, pin) {
 
   if (await pinPrompt.count()) {
     for (const digit of pin.split('')) {
-      const button = page.getByRole('button', { name: digit }).first();
-      if (await button.count()) {
-        await button.click();
+      const buttonByRole = page.getByRole('button', { name: digit }).first();
+      if (await buttonByRole.count()) {
+        await buttonByRole.click();
+        continue;
+      }
+
+      const buttonByText = page.locator(`button:has-text("${digit}")`).first();
+      if (await buttonByText.count()) {
+        await buttonByText.click();
       }
     }
 
@@ -99,6 +106,7 @@ async function unlockTracker(page, pin) {
     const input = page.locator('input[type="password"], input').first();
     if (await input.count()) {
       await input.fill(pin);
+
       const submitButton = page.getByRole('button', { name: /enter|submit|unlock|continue|ok|✓/i }).first();
       if (await submitButton.count()) {
         await submitButton.click();
@@ -113,103 +121,53 @@ async function unlockTracker(page, pin) {
 }
 
 async function extractMerchantData(page) {
-  return await page.evaluate(() => {
-    function clean(text) {
-      return (text || '').replace(/\s+/g, ' ').trim();
+  const debug = await page.evaluate(() => {
+    const localStorageDump = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      localStorageDump[key] = localStorage.getItem(key);
     }
 
-    function pick(obj, keys) {
-      for (const key of keys) {
-        if (obj && obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== '') {
-          return clean(String(obj[key]));
-        }
-      }
-      return '';
+    const sessionStorageDump = {};
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      sessionStorageDump[key] = sessionStorage.getItem(key);
     }
 
-    let merchantsData = [];
-
-    // 1. Direct global variable
-    if (Array.isArray(window.merchants)) {
-      merchantsData = window.merchants;
-    }
-
-    // 2. Common app state containers
-    if (!merchantsData.length && window.appState && Array.isArray(window.appState.merchants)) {
-      merchantsData = window.appState.merchants;
-    }
-
-    if (!merchantsData.length && window.state && Array.isArray(window.state.merchants)) {
-      merchantsData = window.state.merchants;
-    }
-
-    // 3. localStorage fallback
-    if (!merchantsData.length) {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        const value = localStorage.getItem(key);
-
-        if (!value) continue;
-
-        try {
-          const parsed = JSON.parse(value);
-
-          if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
-            const first = parsed[0];
-            const hasMerchantShape =
-              'merchantName' in first ||
-              'name' in first ||
-              'shopName' in first ||
-              'currentStage' in first ||
-              'stage' in first ||
-              'status' in first;
-
-            if (hasMerchantShape) {
-              merchantsData = parsed;
-              break;
-            }
-          }
-
-          if (
-            parsed &&
-            typeof parsed === 'object' &&
-            Array.isArray(parsed.merchants)
-          ) {
-            merchantsData = parsed.merchants;
-            break;
-          }
-        } catch (e) {
-          // ignore non-JSON localStorage values
-        }
-      }
-    }
-
-    // 4. Map to consistent output
-    return merchantsData.map((item) => {
-      const merchant = pick(item, [
-        'merchantName',
-        'name',
-        'shopName',
-        'storeName',
-        'merchant',
-        'accountName'
-      ]);
-
-      const stage = pick(item, [
-        'currentStage',
-        'stage',
-        'status',
-        'onboardingStage'
-      ]);
-
-      return { merchant, stage, raw: item };
+    const allWindowKeys = Object.keys(window);
+    const interestingWindowKeys = allWindowKeys.filter((k) => {
+      const x = k.toLowerCase();
+      return (
+        x.includes('merchant') ||
+        x.includes('store') ||
+        x.includes('stage') ||
+        x.includes('data') ||
+        x.includes('state') ||
+        x.includes('admin') ||
+        x.includes('tracker')
+      );
     });
+
+    return {
+      title: document.title,
+      url: location.href,
+      bodyText: document.body.innerText.slice(0, 4000),
+      localStorageKeys: Object.keys(localStorageDump),
+      sessionStorageKeys: Object.keys(sessionStorageDump),
+      localStorageDump,
+      sessionStorageDump,
+      windowKeys: interestingWindowKeys
+    };
   });
+
+  console.log('DEBUG_PAGE_STATE:', JSON.stringify(debug, null, 2));
+
+  return [];
 }
 
 function buildMessage(data) {
   const grouped = {};
-  STAGES.forEach(stage => {
+  STAGES.forEach((stage) => {
     grouped[stage] = [];
   });
 
@@ -230,7 +188,7 @@ function buildMessage(data) {
     if (!grouped[stage].length) {
       message += '• -\n\n';
     } else {
-      grouped[stage].forEach(name => {
+      grouped[stage].forEach((name) => {
         message += `• ${name}\n`;
       });
       message += '\n';
@@ -274,14 +232,14 @@ async function sendWhatsApp(message) {
     console.log('Extracted merchant objects:', JSON.stringify(rawData, null, 2));
 
     const normalized = rawData
-      .map(item => ({
+      .map((item) => ({
         merchant: clean(item.merchant),
         stage: normalizeStage(item.stage)
       }))
-      .filter(item => item.merchant && STAGES.includes(item.stage));
+      .filter((item) => item.merchant && STAGES.includes(item.stage));
 
     if (!normalized.length) {
-      throw new Error('Merchant data found, but stage fields did not match the expected keys or values.');
+      throw new Error('No usable merchant data found. Check DEBUG_PAGE_STATE in the logs.');
     }
 
     const message = buildMessage(normalized);
@@ -292,7 +250,7 @@ async function sendWhatsApp(message) {
   } finally {
     await browser.close();
   }
-})().catch(err => {
+})().catch((err) => {
   console.error('Automation failed:', err);
   process.exit(1);
 });
