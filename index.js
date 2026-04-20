@@ -40,7 +40,7 @@ function validateEnv() {
 function normalizeStage(text) {
   const value = clean(text);
 
-  const map = {
+  const stageMap = {
     'Documents Collected': '📋 Documents Collected',
     '📋 Documents Collected': '📋 Documents Collected',
 
@@ -72,46 +72,39 @@ function normalizeStage(text) {
     '🚀 Go Live': '🚀 Go Live'
   };
 
-  return map[value] || value;
+  return stageMap[value] || value;
 }
 
-async function unlockWithKeypad(page, pin) {
+async function unlockTracker(page, pin) {
   await page.goto(TRACKER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(2000);
 
-  // Try direct input first
-  const input = page.locator('input[type="password"], input').first();
-  if (await input.count()) {
-    try {
+  const pinPrompt = page.getByText(/Enter Admin PIN/i).first();
+
+  if (await pinPrompt.count()) {
+    for (const digit of pin.split('')) {
+      const button = page.getByRole('button', { name: digit }).first();
+      if (await button.count()) {
+        await button.click();
+      }
+    }
+
+    const submitButton = page.getByRole('button', { name: /enter|submit|unlock|continue|ok|✓/i }).first();
+    if (await submitButton.count()) {
+      await submitButton.click();
+    } else {
+      await page.keyboard.press('Enter');
+    }
+  } else {
+    const input = page.locator('input[type="password"], input').first();
+    if (await input.count()) {
       await input.fill(pin);
-      const submitButton = page.getByRole('button', { name: /submit|unlock|enter|continue|login|✓/i }).first();
+      const submitButton = page.getByRole('button', { name: /enter|submit|unlock|continue|ok|✓/i }).first();
       if (await submitButton.count()) {
         await submitButton.click();
       } else {
         await input.press('Enter');
       }
-    } catch (_) {
-      // If direct input fails, continue to keypad method
-    }
-  }
-
-  // If still on PIN screen, use keypad buttons
-  const pinPrompt = page.getByText(/Enter Admin PIN/i).first();
-  if (await pinPrompt.count()) {
-    for (const digit of pin.split('')) {
-      const btn = page.getByRole('button', { name: digit }).first();
-      if (await btn.count()) {
-        await btn.click();
-      } else {
-        await page.getByText(new RegExp(`^${digit}$`)).first().click();
-      }
-    }
-
-    const okBtn = page.getByRole('button', { name: /✓|enter|submit|unlock|continue/i }).first();
-    if (await okBtn.count()) {
-      await okBtn.click();
-    } else {
-      await page.keyboard.press('Enter');
     }
   }
 
@@ -120,101 +113,112 @@ async function unlockWithKeypad(page, pin) {
 }
 
 async function extractMerchantData(page) {
-  return await page.evaluate((stages) => {
-    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
-
-    // 1. Table-based extraction if table exists
-    const table = document.querySelector('table');
-    if (table) {
-      const headers = Array.from(table.querySelectorAll('thead th')).map(th => clean(th.innerText));
-      const rows = Array.from(table.querySelectorAll('tbody tr'));
-
-      const items = rows.map(row => {
-        const cols = Array.from(row.querySelectorAll('td')).map(td => clean(td.innerText));
-        const obj = {};
-        headers.forEach((h, i) => obj[h] = cols[i] || '');
-
-        const merchant =
-          obj['Merchant Name'] ||
-          obj['Shop / Store Name'] ||
-          obj['Shop Name'] ||
-          obj['Name'] ||
-          cols[1] ||
-          cols[0] ||
-          '';
-
-        let stage =
-          obj['Current Stage'] ||
-          obj['Stage'] ||
-          obj['Status'] ||
-          obj['Onboarding Stage'] ||
-          '';
-
-        if (!stage) {
-          stage = cols.find(c => stages.includes(c)) || '';
-        }
-
-        return { merchant, stage };
-      });
-
-      return items.filter(x => x.merchant && x.stage);
+  return await page.evaluate(() => {
+    function clean(text) {
+      return (text || '').replace(/\s+/g, ' ').trim();
     }
 
-    // 2. Card/list/text-based extraction fallback
-    const allText = clean(document.body.innerText);
-    const lines = allText
-      .split('\n')
-      .map(x => clean(x))
-      .filter(Boolean);
+    function pick(obj, keys) {
+      for (const key of keys) {
+        if (obj && obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== '') {
+          return clean(String(obj[key]));
+        }
+      }
+      return '';
+    }
 
-    const results = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+    let merchantsData = [];
 
-      if (stages.includes(line)) {
-        const prev = lines[i - 1] || '';
-        const next = lines[i + 1] || '';
+    // 1. Direct global variable
+    if (Array.isArray(window.merchants)) {
+      merchantsData = window.merchants;
+    }
 
-        // Merchant name is usually near the stage text; avoid UI labels
-        const ignore = [
-          'Add New Merchant',
-          'Settings & Configuration',
-          'Merchant Onboarding Tracker',
-          'Admin Dashboard',
-          'Live Onboarding Status',
-          'Select a merchant to manage',
-          'Update stages and share live tracker with merchant'
-        ];
+    // 2. Common app state containers
+    if (!merchantsData.length && window.appState && Array.isArray(window.appState.merchants)) {
+      merchantsData = window.appState.merchants;
+    }
 
-        const candidate = [prev, next].find(
-          x => x && !stages.includes(x) && !ignore.includes(x) && x.length > 2
-        );
+    if (!merchantsData.length && window.state && Array.isArray(window.state.merchants)) {
+      merchantsData = window.state.merchants;
+    }
 
-        if (candidate) {
-          results.push({ merchant: candidate, stage: line });
+    // 3. localStorage fallback
+    if (!merchantsData.length) {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        const value = localStorage.getItem(key);
+
+        if (!value) continue;
+
+        try {
+          const parsed = JSON.parse(value);
+
+          if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
+            const first = parsed[0];
+            const hasMerchantShape =
+              'merchantName' in first ||
+              'name' in first ||
+              'shopName' in first ||
+              'currentStage' in first ||
+              'stage' in first ||
+              'status' in first;
+
+            if (hasMerchantShape) {
+              merchantsData = parsed;
+              break;
+            }
+          }
+
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            Array.isArray(parsed.merchants)
+          ) {
+            merchantsData = parsed.merchants;
+            break;
+          }
+        } catch (e) {
+          // ignore non-JSON localStorage values
         }
       }
     }
 
-    // Deduplicate
-    const seen = new Set();
-    return results.filter(item => {
-      const key = `${item.merchant}__${item.stage}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    // 4. Map to consistent output
+    return merchantsData.map((item) => {
+      const merchant = pick(item, [
+        'merchantName',
+        'name',
+        'shopName',
+        'storeName',
+        'merchant',
+        'accountName'
+      ]);
+
+      const stage = pick(item, [
+        'currentStage',
+        'stage',
+        'status',
+        'onboardingStage'
+      ]);
+
+      return { merchant, stage, raw: item };
     });
-  }, STAGES);
+  });
 }
 
 function buildMessage(data) {
   const grouped = {};
-  STAGES.forEach(stage => grouped[stage] = []);
+  STAGES.forEach(stage => {
+    grouped[stage] = [];
+  });
 
   for (const item of data) {
+    const merchant = clean(item.merchant);
     const stage = normalizeStage(item.stage);
-    if (STAGES.includes(stage) && !grouped[stage].includes(item.merchant)) {
-      grouped[stage].push(item.merchant);
+
+    if (merchant && STAGES.includes(stage) && !grouped[stage].includes(merchant)) {
+      grouped[stage].push(merchant);
     }
   }
 
@@ -222,6 +226,7 @@ function buildMessage(data) {
 
   for (const stage of STAGES) {
     message += `${stage}\n`;
+
     if (!grouped[stage].length) {
       message += '• -\n\n';
     } else {
@@ -241,7 +246,7 @@ function buildMessage(data) {
 async function sendWhatsApp(message) {
   const url = `${API_URL}/waInstance${INSTANCE}/sendMessage/${TOKEN}`;
 
-  await axios.post(
+  const response = await axios.post(
     url,
     {
       chatId: `${PHONE}@c.us`,
@@ -252,6 +257,8 @@ async function sendWhatsApp(message) {
       timeout: 60000
     }
   );
+
+  console.log('WhatsApp sent:', response.data);
 }
 
 (async () => {
@@ -261,14 +268,10 @@ async function sendWhatsApp(message) {
   const page = await browser.newPage();
 
   try {
-    await unlockWithKeypad(page, PIN);
+    await unlockTracker(page, PIN);
 
     const rawData = await extractMerchantData(page);
-
-    if (!rawData.length) {
-      console.log(await page.content());
-      throw new Error('No merchant rows were parsed. Tracker UI is not in the expected format.');
-    }
+    console.log('Extracted merchant objects:', JSON.stringify(rawData, null, 2));
 
     const normalized = rawData
       .map(item => ({
@@ -278,7 +281,7 @@ async function sendWhatsApp(message) {
       .filter(item => item.merchant && STAGES.includes(item.stage));
 
     if (!normalized.length) {
-      throw new Error('Merchants were found, but no valid stages matched the configured stage list.');
+      throw new Error('Merchant data found, but stage fields did not match the expected keys or values.');
     }
 
     const message = buildMessage(normalized);
