@@ -23,7 +23,7 @@ const STAGES = [
 ];
 
 function clean(text) {
-  return (text || '').replace(/\s+/g, ' ').trim();
+  return (text || '').toString().replace(/\s+/g, ' ').trim();
 }
 
 function validateEnv() {
@@ -38,8 +38,24 @@ function validateEnv() {
   }
 }
 
-function normalizeStage(text) {
-  const value = clean(text);
+function normalizeStage(value) {
+  if (value === undefined || value === null || value === '') return '';
+
+  // Numeric stage support
+  const num = Number(value);
+  if (!Number.isNaN(num)) {
+    // If app uses 0-based stage index: 0..9
+    if (num >= 0 && num < STAGES.length) {
+      return STAGES[num];
+    }
+
+    // If app uses 1-based stage index: 1..10
+    if (num >= 1 && num <= STAGES.length) {
+      return STAGES[num - 1];
+    }
+  }
+
+  const text = clean(value);
 
   const stageMap = {
     'Documents Collected': '📋 Documents Collected',
@@ -73,7 +89,7 @@ function normalizeStage(text) {
     '🚀 Go Live': '🚀 Go Live'
   };
 
-  return stageMap[value] || value;
+  return stageMap[text] || '';
 }
 
 async function unlockTracker(page, pin) {
@@ -106,6 +122,7 @@ async function unlockTracker(page, pin) {
     const input = page.locator('input[type="password"], input').first();
     if (await input.count()) {
       await input.fill(pin);
+
       const submitButton = page.getByRole('button', { name: /enter|submit|unlock|continue|ok|✓/i }).first();
       if (await submitButton.count()) {
         await submitButton.click();
@@ -147,17 +164,32 @@ async function extractMerchantData(page) {
 
     const nameCandidates = [
       'merchantName',
+      'merchant_name',
       'name',
       'shopName',
+      'shop_name',
       'storeName',
+      'store_name',
       'merchant',
       'accountName',
-      'businessName'
+      'account_name',
+      'businessName',
+      'business_name',
+      'outletName',
+      'outlet_name',
+      'companyName',
+      'company_name',
+      'brandName',
+      'brand_name',
+      'customerName',
+      'customer_name',
+      'clientName',
+      'client_name',
+      'title'
     ];
 
     let merchantsData = [];
 
-    // 1. Try top-level variables directly
     try {
       if (typeof merchants !== 'undefined' && Array.isArray(merchants)) {
         merchantsData = merchants;
@@ -176,7 +208,6 @@ async function extractMerchantData(page) {
       }
     } catch (e) {}
 
-    // 2. Try window properties
     if (!merchantsData.length && Array.isArray(window.merchants)) {
       merchantsData = window.merchants;
     }
@@ -190,7 +221,6 @@ async function extractMerchantData(page) {
       merchantsData = window.state.merchants;
     }
 
-    // 3. Try localStorage / sessionStorage
     const storages = [localStorage, sessionStorage];
     for (const store of storages) {
       if (merchantsData.length) break;
@@ -204,15 +234,8 @@ async function extractMerchantData(page) {
           const parsed = JSON.parse(value);
 
           if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
-            const first = parsed[0];
-            const hasShape =
-              nameCandidates.some(k => k in first) ||
-              stageCandidates.some(k => k in first);
-
-            if (hasShape) {
-              merchantsData = parsed;
-              break;
-            }
+            merchantsData = parsed;
+            break;
           }
 
           if (parsed && typeof parsed === 'object' && Array.isArray(parsed.merchants)) {
@@ -223,7 +246,6 @@ async function extractMerchantData(page) {
       }
     }
 
-    // 4. Final fallback: parse inline script text
     if (!merchantsData.length) {
       const scripts = Array.from(document.scripts)
         .map(s => s.textContent || '')
@@ -256,7 +278,7 @@ async function extractMerchantData(page) {
       extracted: normalized,
       debug: {
         count: normalized.length,
-        sample: normalized.slice(0, 3),
+        sample: normalized.slice(0, 5)
       }
     };
   });
@@ -267,7 +289,7 @@ async function extractMerchantData(page) {
 
 function buildMessage(data) {
   const grouped = {};
-  STAGES.forEach((stage) => {
+  STAGES.forEach(stage => {
     grouped[stage] = [];
   });
 
@@ -275,7 +297,7 @@ function buildMessage(data) {
     const merchant = clean(item.merchant);
     const stage = normalizeStage(item.stage);
 
-    if (merchant && STAGES.includes(stage) && !grouped[stage].includes(merchant)) {
+    if (merchant && stage && STAGES.includes(stage) && !grouped[stage].includes(merchant)) {
       grouped[stage].push(merchant);
     }
   }
@@ -287,7 +309,7 @@ function buildMessage(data) {
     if (!grouped[stage].length) {
       message += '• -\n\n';
     } else {
-      grouped[stage].forEach((name) => {
+      grouped[stage].forEach(name => {
         message += `• ${name}\n`;
       });
       message += '\n';
@@ -330,14 +352,14 @@ async function sendWhatsApp(message) {
     const rawData = await extractMerchantData(page);
 
     const normalized = rawData
-      .map((item) => ({
+      .map(item => ({
         merchant: clean(item.merchant),
         stage: normalizeStage(item.stage)
       }))
-      .filter((item) => item.merchant && STAGES.includes(item.stage));
+      .filter(item => item.merchant && item.stage && STAGES.includes(item.stage));
 
     if (!normalized.length) {
-      throw new Error('Merchant data still not matched. Check DEBUG_MERCHANT_RESULT in logs.');
+      throw new Error('Merchant data extracted, but merchant name or stage mapping still did not match.');
     }
 
     const message = buildMessage(normalized);
@@ -348,7 +370,7 @@ async function sendWhatsApp(message) {
   } finally {
     await browser.close();
   }
-})().catch((err) => {
+})().catch(err => {
   console.error('Automation failed:', err);
   process.exit(1);
 });
