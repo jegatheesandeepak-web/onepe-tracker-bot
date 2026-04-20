@@ -52,12 +52,27 @@ function normalizeStage(value) {
   if (value === undefined || value === null || value === '') return '';
 
   const num = Number(value);
+
+  // IMPORTANT FIX:
+  // The tracker is using 1-based stage numbering:
+  // 1 = Documents Collected
+  // 2 = Documents Verified
+  // 3 = Onboarding Processed
+  // 4 = Agreement Sent & Signed
+  // 5 = Approved by Payswiff
+  // 6 = Device Configured
+  // 7 = Sample Bill Collected
+  // 8 = Installed
+  // 9 = Payment Collected
+  // 10 = Go Live
   if (!Number.isNaN(num)) {
-    if (num >= 0 && num < STAGES.length) {
-      return STAGES[num];
-    }
     if (num >= 1 && num <= STAGES.length) {
       return STAGES[num - 1];
+    }
+
+    // Fallback only if any old data comes in 0-based form
+    if (num >= 0 && num < STAGES.length) {
+      return STAGES[num];
     }
   }
 
