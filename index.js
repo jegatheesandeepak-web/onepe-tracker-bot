@@ -22,6 +22,10 @@ const STAGES = [
   '🚀 Go Live'
 ];
 
+function clean(text) {
+  return (text || '').replace(/\s+/g, ' ').trim();
+}
+
 function validateEnv() {
   const missing = [];
   if (!API_URL) missing.push('GREEN_API_URL');
@@ -33,48 +37,81 @@ function validateEnv() {
   }
 }
 
-function clean(text) {
-  return (text || '').replace(/\s+/g, ' ').trim();
-}
-
 function normalizeStage(text) {
   const value = clean(text);
-  const byEmojiOrText = {
+
+  const map = {
     'Documents Collected': '📋 Documents Collected',
     '📋 Documents Collected': '📋 Documents Collected',
+
     'Documents Verified': '🔍 Documents Verified',
     '🔍 Documents Verified': '🔍 Documents Verified',
+
     'Onboarding Processed': '⚙️ Onboarding Processed',
     '⚙️ Onboarding Processed': '⚙️ Onboarding Processed',
+
     'Agreement Sent & Signed': '✍️ Agreement Sent & Signed',
     '✍️ Agreement Sent & Signed': '✍️ Agreement Sent & Signed',
+
     'Approved by Payswiff': '📤 Approved by Payswiff',
     '📤 Approved by Payswiff': '📤 Approved by Payswiff',
+
     'Device Configured': '✅ Device Configured',
     '✅ Device Configured': '✅ Device Configured',
+
     'Sample Bill Collected': '🧾 Sample Bill Collected',
     '🧾 Sample Bill Collected': '🧾 Sample Bill Collected',
+
     'Installed': '📲 Installed',
     '📲 Installed': '📲 Installed',
+
     'Payment Collected': '💰 Payment Collected',
     '💰 Payment Collected': '💰 Payment Collected',
+
     'Go Live': '🚀 Go Live',
-    '🚀 Go Live': '🚀 Go Live',
+    '🚀 Go Live': '🚀 Go Live'
   };
-  return byEmojiOrText[value] || value;
+
+  return map[value] || value;
 }
 
-async function unlockTracker(page) {
+async function unlockWithKeypad(page, pin) {
   await page.goto(TRACKER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
 
-  const passwordInput = page.locator('input[type="password"], input[placeholder*="PIN" i]').first();
-  if (await passwordInput.count()) {
-    await passwordInput.fill(PIN);
-    const submitButton = page.getByRole('button').filter({ hasText: /submit|unlock|enter|login|continue/i }).first();
-    if (await submitButton.count()) {
-      await submitButton.click();
+  // Try direct input first
+  const input = page.locator('input[type="password"], input').first();
+  if (await input.count()) {
+    try {
+      await input.fill(pin);
+      const submitButton = page.getByRole('button', { name: /submit|unlock|enter|continue|login|✓/i }).first();
+      if (await submitButton.count()) {
+        await submitButton.click();
+      } else {
+        await input.press('Enter');
+      }
+    } catch (_) {
+      // If direct input fails, continue to keypad method
+    }
+  }
+
+  // If still on PIN screen, use keypad buttons
+  const pinPrompt = page.getByText(/Enter Admin PIN/i).first();
+  if (await pinPrompt.count()) {
+    for (const digit of pin.split('')) {
+      const btn = page.getByRole('button', { name: digit }).first();
+      if (await btn.count()) {
+        await btn.click();
+      } else {
+        await page.getByText(new RegExp(`^${digit}$`)).first().click();
+      }
+    }
+
+    const okBtn = page.getByRole('button', { name: /✓|enter|submit|unlock|continue/i }).first();
+    if (await okBtn.count()) {
+      await okBtn.click();
     } else {
-      await passwordInput.press('Enter');
+      await page.keyboard.press('Enter');
     }
   }
 
@@ -82,63 +119,92 @@ async function unlockTracker(page) {
   await page.waitForTimeout(3000);
 }
 
-async function readRows(page) {
-  return await page.evaluate(() => {
-    const tables = Array.from(document.querySelectorAll('table'));
-    if (!tables.length) return [];
+async function extractMerchantData(page) {
+  return await page.evaluate((stages) => {
+    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
 
-    const table = tables[0];
-    const headers = Array.from(table.querySelectorAll('thead th')).map(th => th.innerText.trim());
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    // 1. Table-based extraction if table exists
+    const table = document.querySelector('table');
+    if (table) {
+      const headers = Array.from(table.querySelectorAll('thead th')).map(th => clean(th.innerText));
+      const rows = Array.from(table.querySelectorAll('tbody tr'));
 
-    return rows.map((row) => {
-      const cols = Array.from(row.querySelectorAll('td')).map(td => td.innerText.trim());
-      const obj = {};
-      headers.forEach((h, i) => obj[h] = cols[i] || '');
-      return { cols, obj };
-    });
-  });
-}
+      const items = rows.map(row => {
+        const cols = Array.from(row.querySelectorAll('td')).map(td => clean(td.innerText));
+        const obj = {};
+        headers.forEach((h, i) => obj[h] = cols[i] || '');
 
-function mapMerchantStage(rows) {
-  const results = [];
+        const merchant =
+          obj['Merchant Name'] ||
+          obj['Shop / Store Name'] ||
+          obj['Shop Name'] ||
+          obj['Name'] ||
+          cols[1] ||
+          cols[0] ||
+          '';
 
-  for (const row of rows) {
-    const obj = row.obj || {};
-    const cols = row.cols || [];
+        let stage =
+          obj['Current Stage'] ||
+          obj['Stage'] ||
+          obj['Status'] ||
+          obj['Onboarding Stage'] ||
+          '';
 
-    const merchant =
-      clean(obj['Merchant Name']) ||
-      clean(obj['Account Name']) ||
-      clean(obj['Name']) ||
-      clean(cols[1]) ||
-      clean(cols[0]);
+        if (!stage) {
+          stage = cols.find(c => stages.includes(c)) || '';
+        }
 
-    if (!merchant) continue;
+        return { merchant, stage };
+      });
 
-    let stage =
-      clean(obj['Current Stage']) ||
-      clean(obj['Stage']) ||
-      clean(obj['Status']) ||
-      clean(obj['Onboarding Stage']);
-
-    if (!stage) {
-      // Fallback: choose the last non-empty cell that looks like a stage value
-      const possible = cols
-        .map(clean)
-        .filter(Boolean)
-        .map(normalizeStage)
-        .find(v => STAGES.includes(v));
-      stage = possible || '';
-    } else {
-      stage = normalizeStage(stage);
+      return items.filter(x => x.merchant && x.stage);
     }
 
-    if (!stage || !STAGES.includes(stage)) continue;
-    results.push({ merchant, stage });
-  }
+    // 2. Card/list/text-based extraction fallback
+    const allText = clean(document.body.innerText);
+    const lines = allText
+      .split('\n')
+      .map(x => clean(x))
+      .filter(Boolean);
 
-  return results;
+    const results = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (stages.includes(line)) {
+        const prev = lines[i - 1] || '';
+        const next = lines[i + 1] || '';
+
+        // Merchant name is usually near the stage text; avoid UI labels
+        const ignore = [
+          'Add New Merchant',
+          'Settings & Configuration',
+          'Merchant Onboarding Tracker',
+          'Admin Dashboard',
+          'Live Onboarding Status',
+          'Select a merchant to manage',
+          'Update stages and share live tracker with merchant'
+        ];
+
+        const candidate = [prev, next].find(
+          x => x && !stages.includes(x) && !ignore.includes(x) && x.length > 2
+        );
+
+        if (candidate) {
+          results.push({ merchant: candidate, stage: line });
+        }
+      }
+    }
+
+    // Deduplicate
+    const seen = new Set();
+    return results.filter(item => {
+      const key = `${item.merchant}__${item.stage}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, STAGES);
 }
 
 function buildMessage(data) {
@@ -146,8 +212,9 @@ function buildMessage(data) {
   STAGES.forEach(stage => grouped[stage] = []);
 
   for (const item of data) {
-    if (!grouped[item.stage].includes(item.merchant)) {
-      grouped[item.stage].push(item.merchant);
+    const stage = normalizeStage(item.stage);
+    if (STAGES.includes(stage) && !grouped[stage].includes(item.merchant)) {
+      grouped[stage].push(item.merchant);
     }
   }
 
@@ -165,23 +232,26 @@ function buildMessage(data) {
     }
   }
 
-  message += `Total Merchants: ${data.length}`;
+  const total = Object.values(grouped).reduce((sum, arr) => sum + arr.length, 0);
+  message += `Total Merchants: ${total}`;
+
   return message;
 }
 
 async function sendWhatsApp(message) {
   const url = `${API_URL}/waInstance${INSTANCE}/sendMessage/${TOKEN}`;
-  const payload = {
-    chatId: `${PHONE}@c.us`,
-    message
-  };
 
-  const response = await axios.post(url, payload, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: 60000
-  });
-
-  console.log('WhatsApp message sent:', response.data);
+  await axios.post(
+    url,
+    {
+      chatId: `${PHONE}@c.us`,
+      message
+    },
+    {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 60000
+    }
+  );
 }
 
 (async () => {
@@ -191,17 +261,31 @@ async function sendWhatsApp(message) {
   const page = await browser.newPage();
 
   try {
-    await unlockTracker(page);
-    const rawRows = await readRows(page);
-    const mapped = mapMerchantStage(rawRows);
+    await unlockWithKeypad(page, PIN);
 
-    if (!mapped.length) {
-      throw new Error('No merchant rows were parsed. Check the tracker table structure and selectors.');
+    const rawData = await extractMerchantData(page);
+
+    if (!rawData.length) {
+      console.log(await page.content());
+      throw new Error('No merchant rows were parsed. Tracker UI is not in the expected format.');
     }
 
-    const message = buildMessage(mapped);
+    const normalized = rawData
+      .map(item => ({
+        merchant: clean(item.merchant),
+        stage: normalizeStage(item.stage)
+      }))
+      .filter(item => item.merchant && STAGES.includes(item.stage));
+
+    if (!normalized.length) {
+      throw new Error('Merchants were found, but no valid stages matched the configured stage list.');
+    }
+
+    const message = buildMessage(normalized);
     console.log(message);
+
     await sendWhatsApp(message);
+    console.log('WhatsApp message sent successfully.');
   } finally {
     await browser.close();
   }
