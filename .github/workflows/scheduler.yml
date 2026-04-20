@@ -3,11 +3,8 @@ name: OnePe Tracker Bot
 on:
   workflow_dispatch:
   schedule:
-    # 9:07 AM IST = 03:37 UTC
     - cron: '37 3 * * *'
-    # 2:07 PM IST = 08:37 UTC
     - cron: '37 8 * * *'
-    # 8:07 PM IST = 14:37 UTC
     - cron: '37 14 * * *'
 
 jobs:
@@ -25,7 +22,7 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
