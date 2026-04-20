@@ -106,7 +106,6 @@ async function unlockTracker(page, pin) {
     const input = page.locator('input[type="password"], input').first();
     if (await input.count()) {
       await input.fill(pin);
-
       const submitButton = page.getByRole('button', { name: /enter|submit|unlock|continue|ok|✓/i }).first();
       if (await submitButton.count()) {
         await submitButton.click();
@@ -121,48 +120,149 @@ async function unlockTracker(page, pin) {
 }
 
 async function extractMerchantData(page) {
-  const debug = await page.evaluate(() => {
-    const localStorageDump = {};
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      localStorageDump[key] = localStorage.getItem(key);
+  const result = await page.evaluate(() => {
+    const pick = (obj, keys) => {
+      for (const key of keys) {
+        if (
+          obj &&
+          obj[key] !== undefined &&
+          obj[key] !== null &&
+          String(obj[key]).trim() !== ''
+        ) {
+          return String(obj[key]).replace(/\s+/g, ' ').trim();
+        }
+      }
+      return '';
+    };
+
+    const stageCandidates = [
+      'currentStage',
+      'stage',
+      'status',
+      'onboardingStage',
+      'step',
+      'current_status',
+      'current_stage'
+    ];
+
+    const nameCandidates = [
+      'merchantName',
+      'name',
+      'shopName',
+      'storeName',
+      'merchant',
+      'accountName',
+      'businessName'
+    ];
+
+    let merchantsData = [];
+
+    // 1. Try top-level variables directly
+    try {
+      if (typeof merchants !== 'undefined' && Array.isArray(merchants)) {
+        merchantsData = merchants;
+      }
+    } catch (e) {}
+
+    try {
+      if (!merchantsData.length && typeof merchantList !== 'undefined' && Array.isArray(merchantList)) {
+        merchantsData = merchantList;
+      }
+    } catch (e) {}
+
+    try {
+      if (!merchantsData.length && typeof data !== 'undefined' && Array.isArray(data)) {
+        merchantsData = data;
+      }
+    } catch (e) {}
+
+    // 2. Try window properties
+    if (!merchantsData.length && Array.isArray(window.merchants)) {
+      merchantsData = window.merchants;
+    }
+    if (!merchantsData.length && Array.isArray(window.merchantList)) {
+      merchantsData = window.merchantList;
+    }
+    if (!merchantsData.length && window.appState && Array.isArray(window.appState.merchants)) {
+      merchantsData = window.appState.merchants;
+    }
+    if (!merchantsData.length && window.state && Array.isArray(window.state.merchants)) {
+      merchantsData = window.state.merchants;
     }
 
-    const sessionStorageDump = {};
-    for (let i = 0; i < sessionStorage.length; i++) {
-      const key = sessionStorage.key(i);
-      sessionStorageDump[key] = sessionStorage.getItem(key);
+    // 3. Try localStorage / sessionStorage
+    const storages = [localStorage, sessionStorage];
+    for (const store of storages) {
+      if (merchantsData.length) break;
+
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i);
+        const value = store.getItem(key);
+        if (!value) continue;
+
+        try {
+          const parsed = JSON.parse(value);
+
+          if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
+            const first = parsed[0];
+            const hasShape =
+              nameCandidates.some(k => k in first) ||
+              stageCandidates.some(k => k in first);
+
+            if (hasShape) {
+              merchantsData = parsed;
+              break;
+            }
+          }
+
+          if (parsed && typeof parsed === 'object' && Array.isArray(parsed.merchants)) {
+            merchantsData = parsed.merchants;
+            break;
+          }
+        } catch (e) {}
+      }
     }
 
-    const allWindowKeys = Object.keys(window);
-    const interestingWindowKeys = allWindowKeys.filter((k) => {
-      const x = k.toLowerCase();
-      return (
-        x.includes('merchant') ||
-        x.includes('store') ||
-        x.includes('stage') ||
-        x.includes('data') ||
-        x.includes('state') ||
-        x.includes('admin') ||
-        x.includes('tracker')
-      );
+    // 4. Final fallback: parse inline script text
+    if (!merchantsData.length) {
+      const scripts = Array.from(document.scripts)
+        .map(s => s.textContent || '')
+        .join('\n');
+
+      const patterns = [
+        /(?:const|let|var)\s+merchants\s*=\s*(\[[\s\S]*?\]);/,
+        /(?:const|let|var)\s+merchantList\s*=\s*(\[[\s\S]*?\]);/,
+        /"merchants"\s*:\s*(\[[\s\S]*?\])/,
+      ];
+
+      for (const pattern of patterns) {
+        const match = scripts.match(pattern);
+        if (match && match[1]) {
+          try {
+            merchantsData = JSON.parse(match[1]);
+            break;
+          } catch (e) {}
+        }
+      }
+    }
+
+    const normalized = merchantsData.map(item => {
+      const merchant = pick(item, nameCandidates);
+      const stage = pick(item, stageCandidates);
+      return { merchant, stage, raw: item };
     });
 
     return {
-      title: document.title,
-      url: location.href,
-      bodyText: document.body.innerText.slice(0, 4000),
-      localStorageKeys: Object.keys(localStorageDump),
-      sessionStorageKeys: Object.keys(sessionStorageDump),
-      localStorageDump,
-      sessionStorageDump,
-      windowKeys: interestingWindowKeys
+      extracted: normalized,
+      debug: {
+        count: normalized.length,
+        sample: normalized.slice(0, 3),
+      }
     };
   });
 
-  console.log('DEBUG_PAGE_STATE:', JSON.stringify(debug, null, 2));
-
-  return [];
+  console.log('DEBUG_MERCHANT_RESULT:', JSON.stringify(result, null, 2));
+  return result.extracted || [];
 }
 
 function buildMessage(data) {
@@ -184,7 +284,6 @@ function buildMessage(data) {
 
   for (const stage of STAGES) {
     message += `${stage}\n`;
-
     if (!grouped[stage].length) {
       message += '• -\n\n';
     } else {
@@ -229,7 +328,6 @@ async function sendWhatsApp(message) {
     await unlockTracker(page, PIN);
 
     const rawData = await extractMerchantData(page);
-    console.log('Extracted merchant objects:', JSON.stringify(rawData, null, 2));
 
     const normalized = rawData
       .map((item) => ({
@@ -239,7 +337,7 @@ async function sendWhatsApp(message) {
       .filter((item) => item.merchant && STAGES.includes(item.stage));
 
     if (!normalized.length) {
-      throw new Error('No usable merchant data found. Check DEBUG_PAGE_STATE in the logs.');
+      throw new Error('Merchant data still not matched. Check DEBUG_MERCHANT_RESULT in logs.');
     }
 
     const message = buildMessage(normalized);
