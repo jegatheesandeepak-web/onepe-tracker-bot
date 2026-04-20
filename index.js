@@ -53,8 +53,7 @@ function normalizeStage(value) {
 
   const num = Number(value);
 
-  // IMPORTANT FIX:
-  // The tracker is using 1-based stage numbering:
+  // Tracker is using 1-based stage numbering:
   // 1 = Documents Collected
   // 2 = Documents Verified
   // 3 = Onboarding Processed
@@ -385,38 +384,97 @@ function buildMessage(data, previousSnapshot = {}) {
   const counts = getStageCounts(data);
   const movements = getMovements(data, previousSnapshot);
 
-  let message = '📊 OnePe Tracker – Smart Team Update\n\n';
-
   const total = Object.values(grouped).reduce((sum, arr) => sum + arr.length, 0);
-  message += `Total Merchants: ${total}\n\n`;
+  const liveCount = grouped['🚀 Go Live'] ? grouped['🚀 Go Live'].length : 0;
+  const pipelineCount = total - liveCount;
+  const conversion = total > 0 ? ((liveCount / total) * 100).toFixed(1) : '0.0';
 
-  message += '📈 Stage Counts\n';
+  let message = '📊 *OnePe Tracker – Sales Performance Update*\n\n';
+
+  message += `*Total Merchants:* ${total}\n`;
+  message += `*🚀 Go Live:* ${liveCount}\n`;
+  message += `*⏳ Pipeline:* ${pipelineCount}\n`;
+  message += `*📈 Conversion:* ${conversion}%\n\n`;
+
+  message += '📌 *Stage Summary*\n';
   for (const stage of STAGES) {
-    message += `${stage}: ${counts[stage]}\n`;
+    const count = counts[stage] || 0;
+    if (count > 0) {
+      message += `${stage}: ${count}\n`;
+    }
   }
 
-  message += '\n🔄 Moved Since Last Run\n';
+  message += '\n🔄 *Movement Since Last Run*\n';
   if (!movements.length) {
-    message += '• No stage movement\n';
+    message += '• No movement. Team needs push on pending pipeline.\n';
   } else {
     movements.slice(0, 20).forEach(item => {
       message += `• ${item.merchant}: ${item.oldStage} → ${item.newStage}\n`;
     });
   }
 
-  message += '\n📋 Stage-wise Account Details\n\n';
+  message += '\n🔥 *Immediate Action Required*\n\n';
 
-  for (const stage of STAGES) {
-    message += `${stage}\n`;
-    if (!grouped[stage].length) {
-      message += '• -\n\n';
-    } else {
-      grouped[stage].forEach(name => {
+  const priorityStages = [
+    '⚙️ Onboarding Processed',
+    '✍️ Agreement Sent & Signed',
+    '📤 Approved by Payswiff',
+    '✅ Device Configured',
+    '🧾 Sample Bill Collected',
+    '📲 Installed',
+    '💰 Payment Collected'
+  ];
+
+  let hasPriorityData = false;
+
+  for (const stage of priorityStages) {
+    const merchants = grouped[stage] || [];
+    if (!merchants.length) continue;
+
+    hasPriorityData = true;
+    message += `*${stage} (${merchants.length})*\n`;
+    merchants.forEach(name => {
+      message += `• ${name}\n`;
+    });
+    message += '\n';
+  }
+
+  if (!hasPriorityData) {
+    message += '• No pending action buckets.\n\n';
+  }
+
+  const earlyPipelineStages = [
+    '📋 Documents Collected',
+    '🔍 Documents Verified'
+  ];
+
+  const earlyAccounts = earlyPipelineStages.flatMap(stage => grouped[stage] || []);
+
+  if (earlyAccounts.length) {
+    message += '🧩 *Early Stage Pipeline*\n';
+    earlyPipelineStages.forEach(stage => {
+      const merchants = grouped[stage] || [];
+      if (!merchants.length) return;
+
+      message += `*${stage} (${merchants.length})*\n`;
+      merchants.forEach(name => {
         message += `• ${name}\n`;
       });
       message += '\n';
-    }
+    });
   }
+
+  const liveList = grouped['🚀 Go Live'] || [];
+  message += `🚀 *Go Live Accounts (${liveList.length})*\n`;
+  if (!liveList.length) {
+    message += '• No live accounts yet\n';
+  } else {
+    liveList.forEach(name => {
+      message += `• ${name}\n`;
+    });
+  }
+
+  message += '\n\n🎯 *Sales Focus:* Push pending merchants to next stage and improve Go Live conversion.';
 
   return message.trim();
 }
